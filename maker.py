@@ -38,14 +38,14 @@ QUOTE_ASSET = config['assets']['quote']
 ARBITRUM_ETH_ASSET = config['assets']['arbitrum_eth']
 
 # Trading amounts
-ETH_SELL_AMOUNT = config['trading_amounts']['eth']['sell']['primary']
-ETH_BUY_AMOUNT = config['trading_amounts']['eth']['buy']['primary']
-BTC_SELL_AMOUNT = config['trading_amounts']['btc']['sell']['primary']
-BTC_BUY_AMOUNT = config['trading_amounts']['btc']['buy']['primary']
-DOT_SELL_AMOUNT = config['trading_amounts']['dot']['sell']['primary']
-DOT_BUY_AMOUNT = config['trading_amounts']['dot']['buy']['primary']
-ARBITRUM_ETH_SELL_AMOUNT = config['trading_amounts']['arbitrum_eth']['sell']['primary']
-ARBITRUM_ETH_BUY_AMOUNT = config['trading_amounts']['arbitrum_eth']['buy']['primary']
+ETH_SELL_AMOUNT = config['trading_amounts']['eth']['sell']
+ETH_BUY_AMOUNT = config['trading_amounts']['eth']['buy']
+BTC_SELL_AMOUNT = config['trading_amounts']['btc']['sell']
+BTC_BUY_AMOUNT = config['trading_amounts']['btc']['buy']
+DOT_SELL_AMOUNT = config['trading_amounts']['dot']['sell']
+DOT_BUY_AMOUNT = config['trading_amounts']['dot']['buy']
+ARBITRUM_ETH_SELL_AMOUNT = config['trading_amounts']['arbitrum_eth']['sell']
+ARBITRUM_ETH_BUY_AMOUNT = config['trading_amounts']['arbitrum_eth']['buy']
 
 # Logging configuration
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
@@ -89,6 +89,51 @@ async def log_success(message):
 
 def calculate_tick(price, base_precision, quote_precision):
     return math.floor(math.log(price * quote_precision / base_precision) / math.log(1.0001))
+
+async def get_account_balance(session):
+    url = CHAINFLIP_API_URL
+    headers = {
+        'Content-Type': 'application/json',
+    }
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "cf_account_info",
+        "params": {
+            "account_id": CHAINFLIP_LP_ADDRESS
+        }
+    }
+
+    try:
+        async with session.post(url, headers=headers, json=payload) as response:
+            data = await response.json()
+            balances = data['result']['balances']
+            return {
+                'ETH': int(balances['Ethereum']['ETH'], 16) / 1e18,
+                'BTC': int(balances['Bitcoin']['BTC'], 16) / 1e8,
+                'DOT': int(balances['Polkadot']['DOT'], 16) / 1e10,
+                'USDC': int(balances['Ethereum']['USDC'], 16) / 1e6,
+                'ARBITRUM_ETH': int(balances['Arbitrum']['ETH'], 16) / 1e18
+            }
+    except Exception as e:
+        logging.error(f"Error fetching account balance: {e}")
+        return None
+
+async def calculate_order_size(session, asset, side, current_price):
+    balances = await get_account_balance(session)
+    if balances is None:
+        return 0
+
+    if side == 'buy':
+        available_usdc = balances['USDC']
+        percentage = config['trading_amounts'][asset.lower()]['buy']['percentage'] / 100
+        max_order_size = (available_usdc * percentage) / current_price
+    else:  # sell
+        available_asset = balances[asset]
+        percentage = config['trading_amounts'][asset.lower()]['sell']['percentage'] / 100
+        max_order_size = available_asset * percentage
+
+    return max_order_size
 
 async def place_limit_order(session, order_type, price, amount, pair, base_asset, quote_asset, order_id):
     if base_asset['asset'] == 'ETH' or base_asset['asset'] == 'ARBITRUM_ETH':
@@ -400,37 +445,49 @@ async def run_market_making_bot():
 
                 tasks = []
 
-                if (eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ETH'] == 0) and ETH_SELL_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'sell', eth_sell_price, ETH_SELL_AMOUNT, eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=1))
-                if (eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ETH'] == 0) and ETH_BUY_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'buy', eth_buy_price, ETH_BUY_AMOUNT, eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=2))
-                if tasks:
-                    last_order_prices['ETH'] = eth_mid_price
-                    logging.info(f"Updating ETH orders: Sell at ${eth_sell_price:.2f}, Buy at ${eth_buy_price:.2f}")
+                if (eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ETH'] == 0):
+                    eth_sell_amount = await calculate_order_size(session, 'ETH', 'sell', eth_sell_price)
+                    eth_buy_amount = await calculate_order_size(session, 'ETH', 'buy', eth_buy_price)
+                    if eth_sell_amount > 0:
+                        tasks.append(place_limit_order(session, 'sell', eth_sell_price, eth_sell_amount, eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=1))
+                    if eth_buy_amount > 0:
+                        tasks.append(place_limit_order(session, 'buy', eth_buy_price, eth_buy_amount, eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=2))
+                    if tasks:
+                        last_order_prices['ETH'] = eth_mid_price
+                        logging.info(f"Updating ETH orders: Sell {eth_sell_amount:.6f} at ${eth_sell_price:.2f}, Buy {eth_buy_amount:.6f} at ${eth_buy_price:.2f}")
 
-                if (btc_price_change > config['trading']['price_change_threshold'] or last_order_prices['BTC'] == 0) and BTC_SELL_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'sell', btc_sell_price, BTC_SELL_AMOUNT, btc_pair, BTC_ASSET, QUOTE_ASSET, order_id=3))
-                if (btc_price_change > config['trading']['price_change_threshold'] or last_order_prices['BTC'] == 0) and BTC_BUY_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'buy', btc_buy_price, BTC_BUY_AMOUNT, btc_pair, BTC_ASSET, QUOTE_ASSET, order_id=4))
-                if tasks:
-                    last_order_prices['BTC'] = btc_mid_price
-                    logging.info(f"Updating BTC orders: Sell at ${btc_sell_price:.2f}, Buy at ${btc_buy_price:.2f}")
+                if (btc_price_change > config['trading']['price_change_threshold'] or last_order_prices['BTC'] == 0):
+                    eth_sell_amount = await calculate_order_size(session, 'BTC', 'sell', btc_sell_price)
+                    eth_buy_amount = await calculate_order_size(session, 'BTC', 'buy', btc_buy_price)
+                    if btc_sell_amount > 0:
+                        tasks.append(place_limit_order(session, 'sell', btc_sell_price, btc_sell_amount, btc_pair, BASE_ASSET, QUOTE_ASSET, order_id=1))
+                    if btc_buy_amount > 0:
+                        tasks.append(place_limit_order(session, 'buy', btc_buy_price, btc_buy_amount, btc_pair, BASE_ASSET, QUOTE_ASSET, order_id=2))
+                    if tasks:
+                        last_order_prices['BTC'] = btc_mid_price
+                        logging.info(f"Updating BTC orders: Sell {btc_sell_amount:.6f} at ${btc_sell_price:.2f}, Buy {btc_buy_amount:.6f} at ${btc_buy_price:.2f}")
 
-                if (dot_price_change > config['trading']['price_change_threshold'] or last_order_prices['DOT'] == 0) and DOT_SELL_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'sell', dot_sell_price, DOT_SELL_AMOUNT, dot_pair, DOT_ASSET, QUOTE_ASSET, order_id=5))
-                if (dot_price_change > config['trading']['price_change_threshold'] or last_order_prices['DOT'] == 0) and DOT_BUY_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'buy', dot_buy_price, DOT_BUY_AMOUNT, dot_pair, DOT_ASSET, QUOTE_ASSET, order_id=6))
-                if tasks:
-                    last_order_prices['DOT'] = dot_mid_price
-                    logging.info(f"Updating DOT orders: Sell at ${dot_sell_price:.2f}, Buy at ${dot_buy_price:.2f}")
+                if (dot_price_change > config['trading']['price_change_threshold'] or last_order_prices['DOT'] == 0):
+                    dot_sell_amount = await calculate_order_size(session, 'DOT', 'sell', dot_sell_price)
+                    dot_buy_amount = await calculate_order_size(session, 'DOT', 'buy', dot_buy_price)
+                    if dot_sell_amount > 0:
+                        tasks.append(place_limit_order(session, 'sell', dot_sell_price, dot_sell_amount, dot_pair, BASE_ASSET, QUOTE_ASSET, order_id=1))
+                    if dot_buy_amount > 0:
+                        tasks.append(place_limit_order(session, 'buy', dot_buy_price, dot_buy_amount, dot_pair, BASE_ASSET, QUOTE_ASSET, order_id=2))
+                    if tasks:
+                        last_order_prices['DOT'] = dot_mid_price
+                        logging.info(f"Updating DOT orders: Sell {dot_sell_amount:.6f} at ${dot_sell_price:.2f}, Buy {dot_buy_amount:.6f} at ${dot_buy_price:.2f}")
 
-                if (arbitrum_eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ARBITRUM_ETH'] == 0) and ARBITRUM_ETH_SELL_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'sell', arbitrum_eth_sell_price, ARBITRUM_ETH_SELL_AMOUNT, arbitrum_eth_pair, ARBITRUM_ETH_ASSET, QUOTE_ASSET, order_id=7))
-                if (arbitrum_eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ARBITRUM_ETH'] == 0) and ARBITRUM_ETH_BUY_AMOUNT > 0:
-                    tasks.append(place_limit_order(session, 'buy', arbitrum_eth_buy_price, ARBITRUM_ETH_BUY_AMOUNT, arbitrum_eth_pair, ARBITRUM_ETH_ASSET, QUOTE_ASSET, order_id=8))
-                if tasks:
-                    last_order_prices['ARBITRUM_ETH'] = arbitrum_eth_mid_price
-                    logging.info(f"Updating Arbitrum ETH orders: Sell at ${arbitrum_eth_sell_price:.2f}, Buy at ${arbitrum_eth_buy_price:.2f}")
+                if (arbitrum_eth_price_change > config['trading']['price_change_threshold'] or last_order_prices['ARBITRUM_ETH'] == 0):
+                    arbitrum_eth_sell_amount = await calculate_order_size(session, 'ARBITRUM_ETH', 'sell', arbitrum_eth_sell_price)
+                    arbitrum_eth_buy_amount = await calculate_order_size(session, 'ARBITRUM_ETH', 'buy', arbitrum_eth_buy_price)
+                    if arbitrum_eth_sell_amount > 0:
+                        tasks.append(place_limit_order(session, 'sell', arbitrum_eth_sell_price, arbitrum_eth_sell_amount, arbitrum_eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=1))
+                    if arbitrum_eth_buy_amount > 0:   
+                        tasks.append(place_limit_order(session, 'buy', arbitrum_eth_buy_price, arbitrum_eth_buy_amount, arbitrum_eth_pair, BASE_ASSET, QUOTE_ASSET, order_id=2))
+                    if tasks:
+                        last_order_prices['ARBITRUM_ETH'] = arbitrum_eth_mid_price
+                        logging.info(f"Updating ARBITRUM ETH orders: Sell {arbitrum_eth_sell_amount:.6f} at ${arbitrum_eth_sell_price:.2f}, Buy {arbitrum_eth_buy_amount:.6f} at ${arbitrum_eth_buy_pri>
 
                 if tasks:
                     await asyncio.gather(*tasks)
