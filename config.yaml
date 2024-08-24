@@ -30,24 +30,24 @@ assets:
 trading_amounts:
   eth:
     sell:
-      primary: 0.00
+      percentage: 5  # 5% of available ETH balance
     buy:
-      primary: 0.00
+      percentage: 5  # 5% of available USDC balance (for buying ETH)
   btc:
     sell:
-      primary: 0.00
+      percentage: 5
     buy:
-      primary: 0.00
+      percentage: 5
   dot:
     sell:
-      primary: 0.00
+      percentage: 5
     buy:
-      primary: 0.00
+      percentage: 5
   arbitrum_eth:
     sell:
-      primary: 0.00
+      percentage: 5
     buy:
-      primary: 0.00
+      percentage: 5
 
 # Telegram settings
 telegram:
